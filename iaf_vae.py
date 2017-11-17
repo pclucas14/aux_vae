@@ -69,7 +69,8 @@ class IAFLayer(object):
 
                 if hps.kl_min > 0:
                     # [0, 1, 2, 3] -> [0, 1] -> [1] / (b * k)
-                    kl_ave = tf.reduce_mean(tf.reduce_sum(kl_cost, [2, 3]), [0], keep_dims=True)
+                    activations = tf.reduce_sum(kl_cost, [2,3])
+                    kl_ave = tf.reduce_mean(activations, [0], keep_dims=True)
                     kl_ave = tf.maximum(kl_ave, hps.kl_min)
                     kl_ave = tf.tile(kl_ave, [hps.batch_size * hps.k, 1])
                     kl_obj = tf.reduce_sum(kl_ave, [1])
@@ -85,7 +86,7 @@ class IAFLayer(object):
             else:
                 h = conv2d("down_conv2", h, h_size)
             output = input + 0.1 * h
-            return output, kl_obj, kl_cost
+            return output, kl_obj, kl_cost, activations
 
 
 def model_spec_iaf(x, hps, mode, gpu=-1):
@@ -123,13 +124,21 @@ def model_spec_iaf(x, hps, mode, gpu=-1):
             h_top = tf.reshape(h_top, [1, -1, 1, 1])
             h = tf.tile(h_top, [data_size, 1, int(hps.image_size / 2 ** len(layers)), int(hps.image_size / 2 ** len(layers))])
             kl_cost = kl_obj = 0.0
+            acts = []
 
             for i, layer in reversed(list(enumerate(layers))):
                 for j, sub_layer in reversed(list(enumerate(layer))):
                     with tf.variable_scope("IAF_%d_%d" % (i, j)):
-                        h, cur_obj, cur_cost = sub_layer.down(h)
+                        if hps.kl_min > 0 : 
+                            h, cur_obj, cur_cost, act = sub_layer.down(h)
+                            acts.append(act)
+                        else : 
+                            h, cur_obj, cur_cost      = sub_layer.down(h)
                         kl_obj += cur_obj
                         kl_cost += cur_cost
+            
+            if hps.kl_min > 0 :
+                acts = tf.reduce_mean(tf.add_n(acts), [0])
             
             x = tf.nn.elu(h)
             x = deconv2d("x_dec", x, 3, [5, 5])
@@ -141,4 +150,4 @@ def model_spec_iaf(x, hps, mode, gpu=-1):
         log_pxz = discretized_logistic(x, dec_log_stdv, sample=orig_x)
         obj = tf.reduce_sum(kl_obj - log_pxz)
 
-        return x, log_pxz, kl_cost
+        return (x, log_pxz, kl_cost, acts) if hps.kl_min > 0. else (x, log_pxz, kl_cost)
