@@ -15,10 +15,9 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
     that position.
     'h' is an optional N x K matrix of values to condition our generative model on
     """
-
+    print('Pixel CNN forward pass')
     counters = {}
     with arg_scope([nn.conv2d, nn.deconv2d, nn.gated_resnet, nn.dense], counters=counters, init=init, ema=ema, dropout_p=dropout_p):
-        print('line 21')
         # parse resnet nonlinearity argument
         if resnet_nonlinearity == 'concat_elu':
             resnet_nonlinearity = nn.concat_elu
@@ -32,7 +31,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
 
         with arg_scope([nn.gated_resnet], nonlinearity=resnet_nonlinearity, h=h):
 
-            print('model : up pass')
             # ////////// up pass through pixelCNN ////////
             xs = nn.int_shape(x)
             # add channel of ones to distinguish image from padding later on
@@ -42,7 +40,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
             ul_list = [nn.down_shift(nn.down_shifted_conv2d(x_pad, num_filters=nr_filters, filter_size=[1, 3])) +
                        nn.right_shift(nn.down_right_shifted_conv2d(x_pad, num_filters=nr_filters, filter_size=[2, 1]))]  # stream for up and to the left
 
-            print('model : adding resnet layers 1')
             for rep in range(nr_resnet):
                 u_list.append(nn.gated_resnet(
                     u_list[-1], conv=nn.down_shifted_conv2d))
@@ -55,7 +52,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
             ul_list.append(nn.down_right_shifted_conv2d(
                 ul_list[-1], num_filters=nr_filters, stride=[2, 2]))
 
-            print('model : adding resnet layers 2')
             for rep in range(nr_resnet):
                 u_list.append(nn.gated_resnet(
                     u_list[-1], conv=nn.down_shifted_conv2d))
@@ -67,7 +63,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
             ul_list.append(nn.down_right_shifted_conv2d(
                 ul_list[-1], num_filters=nr_filters, stride=[2, 2]))
 
-            print('model : adding resnet layers 3')
             for rep in range(nr_resnet):
                 u_list.append(nn.gated_resnet(
                     u_list[-1], conv=nn.down_shifted_conv2d))
@@ -76,10 +71,8 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
 
 
             # /////// down pass ////////
-            print('model : down pass')
             u = u_list.pop()
             ul = ul_list.pop()
-            print('model : adding resnet layers 1')
             for rep in range(nr_resnet):
                 u = nn.gated_resnet(
                     u, u_list.pop(), conv=nn.down_shifted_conv2d)
@@ -91,7 +84,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
             ul = nn.down_right_shifted_deconv2d(
                 ul, num_filters=nr_filters, stride=[2, 2])
 
-            print('model : adding resnet layers 2')
             for rep in range(nr_resnet + 1):
                 u = nn.gated_resnet(
                     u, u_list.pop(), conv=nn.down_shifted_conv2d)
@@ -103,7 +95,6 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
             ul = nn.down_right_shifted_deconv2d(
                 ul, num_filters=nr_filters, stride=[2, 2])
 
-            print('model : adding resnet layers 3')
             for rep in range(nr_resnet + 1):
                 u = nn.gated_resnet(
                     u, u_list.pop(), conv=nn.down_shifted_conv2d)

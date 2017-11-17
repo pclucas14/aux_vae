@@ -45,7 +45,10 @@ def load_from_checkpoint(saver, logdir):
             saver.restore(sess, ckpt.model_checkpoint_path)
         else:
             # Restores from checkpoint with relative path.
-            saver.restore(sess, os.path.join(logdir, ckpt.model_checkpoint_path))
+            try : 
+                saver.restore(sess, os.path.join(logdir, ckpt.model_checkpoint_path))
+            except : 
+                saver.restore(sess, ckpt.model_checkpoint_path)
         return True
     return False
 

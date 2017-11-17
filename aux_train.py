@@ -3,6 +3,8 @@ import time
 import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.framework.python.ops import arg_scope
+
+""" IAF IMPORTS """
 from tf_utils.adamax import AdamaxOptimizer
 from tf_utils.hparams import HParams
 from tf_utils.common import img_stretch, img_tile
@@ -12,14 +14,28 @@ from tf_utils.distributions import DiagonalGaussian, discretized_logistic, compu
 from tf_utils.data_utils import get_inputs, get_images
 import tqdm
 
+""" PIXELCNN IMPORTS """
+import pixel_cnn_pp.nn as nn
+import pixel_cnn_pp.plotting as plotting
+from pixel_cnn_pp.model import model_spec
+import data.cifar10_data as cifar10_data
+import data.imagenet_data as imagenet_data
+
+
 # settings
 flags = tf.flags
+''' IAF FLAGS '''
 flags.DEFINE_string("logdir", "iaf/log_dir", "Logging directory.")
 flags.DEFINE_string("hpconfig", "", "Overrides default hyper-parameters.")
 flags.DEFINE_string("mode", "train", "Whether to run 'train' or 'eval' model.")
 flags.DEFINE_integer("num_gpus", 8, "Number of GPUs used.")
+''' PIXELCNN FLAGS '''
+flags.DEFINE_integer("nr_resnet", 5, "Number of residual blocks per stage of the model")
+flags.DEFINE_integer("nr_filters", 160, "Number of filters to use across model. Higher = larger model")
+flags.DEFINE_integer("nr_logistic_mix", 10, "Number of logistic components ni the mixture")
+flags.DEFINE_string("resnet_nonlinearity", "concat_elu", "RenetLayer nonlinearity")
+flags.DEFINE_float("dropout_p", .5, "dropout prob")
 FLAGS = flags.FLAGS
-
 
 class IAFLayer(object):
     def __init__(self, hps, mode, downsample):
@@ -36,7 +52,6 @@ class IAFLayer(object):
         with arg_scope([conv2d]):
             x = tf.nn.elu(input)
             x = conv2d("up_conv1", x, 2 * z_size + 2 * h_size, stride=stride)
-            import pdb; pdb.set_trace()
             self.qz_mean, self.qz_logsd, self.up_context, h = split(x, 1, [z_size, z_size, h_size, h_size])
 
             h = tf.nn.elu(h)
@@ -115,19 +130,22 @@ def get_default_hparams():
 
 
 class CVAE1(object):
-    def __init__(self, hps, mode, x=None):
+    def __init__(self, hps, mode, x=None, use_pixel_cnn=True):
+        global FLAGS
         self.hps = hps
         self.mode = mode
         input_shape = [hps.batch_size * hps.num_gpus, 3, hps.image_size, hps.image_size]
         self.x = tf.placeholder(tf.uint8, shape=input_shape) if x is None else x
         self.m_trunc = []
         self.dec_log_stdv = tf.get_variable("dec_log_stdv", initializer=tf.constant(0.0))
-         
+        
+
         losses = []
         grads = []
         # xs = tf.split(0, hps.num_gpus, self.x)
         xs = tf.split(self.x, hps.num_gpus, 0)
         opt = AdamaxOptimizer(hps.learning_rate)
+        opt_pcnn = AdamaxOptimizer(hps.learning_rate)
 
         num_pixels = 3 * hps.image_size * hps.image_size
         for i in range(hps.num_gpus):
@@ -166,6 +184,14 @@ class CVAE1(object):
 
         x = tf.to_float(x)
         x = tf.clip_by_value((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+
+        if True : 
+            x_t = tf.transpose(x, perm=[0,2,3,1])
+            pixel_cnn = tf.make_template('model', model_spec)
+            model_opt = {'nr_resnet': FLAGS.nr_resnet, 'nr_filters': FLAGS.nr_filters,
+            'nr_logistic_mix': FLAGS.nr_logistic_mix, 'resnet_nonlinearity': FLAGS.resnet_nonlinearity}
+            pdb.set_trace()
+            self.pixel_cnn = pixel_cnn(x_t, None, init=True, dropout_p=FLAGS.dropout_p, **model_opt)
 
         # Input images are repeated k times on the input.
         # This is used for Importance Sampling loss (k is number of samples).
@@ -206,9 +232,6 @@ class CVAE1(object):
                             tf.summary.scalar("model/kl_obj_%02d_%02d" % (i, j), tf.reduce_mean(cur_obj))
                             tf.summary.scalar("model/kl_cost_%02d_%02d" % (i, j), tf.reduce_mean(cur_cost))
 
-            x = tf.nn.elu(h)
-            x = deconv2d("x_dec", x, 3, [5, 5])
-            x = tf.clip_by_value(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
 
         log_pxz = discretized_logistic(x, self.dec_log_stdv, sample=orig_x)
         obj = tf.reduce_sum(kl_obj - log_pxz)
@@ -228,8 +251,10 @@ def run(hps):
 
         hps.num_gpus = 1
         init_x = x[:hps.batch_size, :, :, :]
+        print('first init pass')
         model = CVAE1(hps, "train", x)
         vs.reuse_variables()
+        print('second/last init pass')
         init_model = CVAE1(hps, "init", init_x)
         hps.num_gpus = FLAGS.num_gpus
     saver = tf.train.Saver()
