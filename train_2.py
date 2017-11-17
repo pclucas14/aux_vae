@@ -38,6 +38,8 @@ parser.add_argument('-d', '--data_set', type=str,
                     default='cifar', help='Can be either cifar|imagenet')
 parser.add_argument('-t', '--save_interval', type=int, default=10,
                     help='Every how many epochs to write checkpoint/samples?')
+parser.add_argument('-T', '--write_every', type=int, default=25,
+                    help='Every how many iterations to write to tensorboard?')
 parser.add_argument('-r', '--load_params', dest='load_params', action='store_true',
                     help='Restore training from previous model checkpoint?')
 # model
@@ -235,7 +237,6 @@ tf.summary.scalar('vae/recon_test', tf.reduce_sum(tf.stack(losses_log_pxz_test))
 tf.summary.scalar('vae/kl_test', tf.reduce_sum(tf.stack(losses_kl_test))),
 tf.summary.scalar('comb/lambda_elbo_full_test', tf.reduce_sum(tf.stack(full_objs_test))),
 tf.summary.scalar('pcnn/recon_test', tf.reduce_sum(tf.stack(losses_pcnn_test))),
-
 tf.summary.scalar('comb/elbo_full_test', tf.add_n(elbo_full_test) / \
                         (np.log(2.)*num_pixels*args.batch_size*args.nr_gpu)),
 tf.summary.scalar('vae/elbo_test', tf.add_n(elbo_test) / \
