@@ -30,7 +30,7 @@ def model_spec(x, h=None, init=False, ema=None, dropout_p=0.5, nr_resnet=5, nr_f
                   resnet_nonlinearity + ' is not supported')
 
         with arg_scope([nn.gated_resnet], nonlinearity=resnet_nonlinearity, h=h):
-
+            import pdb; pdb.set_trace()
             # ////////// up pass through pixelCNN ////////
             xs = nn.int_shape(x)
             # add channel of ones to distinguish image from padding later on

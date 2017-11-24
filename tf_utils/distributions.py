@@ -1,6 +1,10 @@
 import numpy as np
 import tensorflow as tf
+import sys
+sys.path.append('..')
+from debug_utils import * 
 
+DEBUGGER = get_debugger()
 
 def gaussian_diag_logps(mean, logvar, sample=None):
     if sample is None:

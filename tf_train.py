@@ -1,3 +1,4 @@
+import json
 import pdb
 import time
 import numpy as np
@@ -11,13 +12,16 @@ from tf_utils.layers import conv2d, deconv2d, ar_multiconv2d, resize_nearest_nei
 from tf_utils.distributions import DiagonalGaussian, discretized_logistic, compute_lowerbound, repeat
 from tf_utils.data_utils import get_inputs, get_images
 import tqdm
+from debug_utils import * 
+
+DEGUGGER = get_debugger()
 
 # settings
 flags = tf.flags
 flags.DEFINE_string("logdir", "iaf/log_dir", "Logging directory.")
 flags.DEFINE_string("hpconfig", "", "Overrides default hyper-parameters.")
 flags.DEFINE_string("mode", "train", "Whether to run 'train' or 'eval' model.")
-flags.DEFINE_integer("num_gpus", 8, "Number of GPUs used.")
+flags.DEFINE_integer("num_gpus", 2, "Number of GPUs used.")
 FLAGS = flags.FLAGS
 
 
@@ -36,7 +40,6 @@ class IAFLayer(object):
         with arg_scope([conv2d]):
             x = tf.nn.elu(input)
             x = conv2d("up_conv1", x, 2 * z_size + 2 * h_size, stride=stride)
-            import pdb; pdb.set_trace()
             self.qz_mean, self.qz_logsd, self.up_context, h = split(x, 1, [z_size, z_size, h_size, h_size])
 
             h = tf.nn.elu(h)
@@ -101,7 +104,7 @@ def get_default_hparams():
     return HParams(
         batch_size=16,        # Batch size on one GPU.
         eval_batch_size=100,  # Batch size for evaluation.
-        num_gpus=8,           # Number of GPUs (effectively increases batch size).
+        num_gpus=1,           # Number of GPUs (effectively increases batch size).
         learning_rate=0.01,   # Learning rate.
         z_size=32,            # Size of z variables.
         h_size=160,           # Size of resnet block.
@@ -116,21 +119,22 @@ def get_default_hparams():
 
 class CVAE1(object):
     def __init__(self, hps, mode, x=None):
+        num_gpus = 1 if mode == 'init' else hps.num_gpus
         self.hps = hps
         self.mode = mode
-        input_shape = [hps.batch_size * hps.num_gpus, 3, hps.image_size, hps.image_size]
+        input_shape = [hps.batch_size * num_gpus, 3, hps.image_size, hps.image_size]
         self.x = tf.placeholder(tf.uint8, shape=input_shape) if x is None else x
         self.m_trunc = []
         self.dec_log_stdv = tf.get_variable("dec_log_stdv", initializer=tf.constant(0.0))
          
         losses = []
         grads = []
-        # xs = tf.split(0, hps.num_gpus, self.x)
-        xs = tf.split(self.x, hps.num_gpus, 0)
+        # xs = tf.split(0, num_gpus, self.x)
+        xs = tf.split(self.x, num_gpus, 0)
         opt = AdamaxOptimizer(hps.learning_rate)
 
         num_pixels = 3 * hps.image_size * hps.image_size
-        for i in range(hps.num_gpus):
+        for i in range(num_gpus):
             with tf.device(assign_to_gpu(i)):
                 m, obj, loss = self._forward(xs[i], i)
                 losses += [loss]
@@ -142,7 +146,7 @@ class CVAE1(object):
 
         self.global_step = tf.get_variable("global_step", [], tf.int32, initializer=tf.zeros_initializer(),
                                             trainable=False)
-        self.bits_per_dim = tf.add_n(losses) / (np.log(2.) * num_pixels * hps.batch_size * hps.num_gpus) 
+        self.bits_per_dim = tf.add_n(losses) / (np.log(2.) * num_pixels * hps.batch_size * num_gpus) 
          
         if mode == "train":
             # add gradients together and get training updates
@@ -164,8 +168,12 @@ class CVAE1(object):
     def _forward(self, x, gpu):
         hps = self.hps
 
+        global DEBUGGER
+
         x = tf.to_float(x)
         x = tf.clip_by_value((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+
+        DEBUGGER['x_float'] = x
 
         # Input images are repeated k times on the input.
         # This is used for Importance Sampling loss (k is number of samples).
@@ -225,8 +233,6 @@ class CVAE1(object):
 def run(hps):
     with tf.variable_scope("model") as vs:
         x = get_inputs(hps.dataset, "train", hps.batch_size * FLAGS.num_gpus, hps.image_size)
-
-        hps.num_gpus = 1
         init_x = x[:hps.batch_size, :, :, :]
         model = CVAE1(hps, "train", x)
         vs.reuse_variables()
@@ -267,7 +273,6 @@ def run(hps):
         print("Running first iteration!")
         while not sv.should_stop():
             fetches = [model.bits_per_dim, model.global_step, model.dec_log_stdv, model.train_op]
-
             should_compute_summary = (local_step % 20 == 19)
             if should_compute_summary:
                 fetches += [model.summary_op]
@@ -277,7 +282,7 @@ def run(hps):
             if should_compute_summary:
                 sv.summary_computed(sess, fetched[-1])
 
-            if local_step < 10 or should_compute_summary:
+            if True : #local_step < 10 or should_compute_summary:
                 print("Iteration %d, time = %.2fs, train bits_per_dim = %.4f, dec_log_stdv = %.4f" % (
                       fetched[1], time.time() - begin, fetched[0], fetched[2]))
                 begin = time.time()

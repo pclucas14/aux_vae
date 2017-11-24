@@ -113,8 +113,6 @@ else:
 # create the model
 model_opt = {'nr_resnet': args.nr_resnet, 'nr_filters': args.nr_filters,
              'nr_logistic_mix': args.nr_logistic_mix, 'resnet_nonlinearity': args.resnet_nonlinearity}
-print('building model start')
-import pdb; pdb.set_trace()
 model = tf.make_template('model', model_spec)
 print('building model end')
 # run once for data dependent initialization of parameters
@@ -141,7 +139,7 @@ for i in range(args.nr_gpu):
         # test
         gen_par = model(xs[i], hs[i], ema=ema, dropout_p=0., **model_opt)
         loss_gen_test.append(nn.discretized_mix_logistic_loss(xs[i], gen_par))
-print('142')
+
 # add losses and gradients together and get training updates
 tf_lr = tf.placeholder(tf.float32, shape=[])
 with tf.device('/gpu:0'):
