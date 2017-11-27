@@ -123,8 +123,12 @@ class IAFLayer(object):
 def model_spec_iaf(x, hps, mode, gpu=-1):
         global DEBUGGER
         # x should already be a float tensor
-        x = tf.to_float(x)
-        x = tf.clip_by_value((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+        # x = tf.to_float(x)
+        # x = tf.clip_by_value((x + 0.5) / 256.0, 0.0, 1.0) - 0.5
+        '''
+        input is in range [-1,1] --> divide by 2 to get [-.5, .5]
+        '''
+        # x = x / 2.
 
         dec_log_stdv = tf.get_variable('dec_log_stdv', initializer=tf.constant(0.0))
         DEBUGGER['dec_log_stdv'] = dec_log_stdv
@@ -180,7 +184,7 @@ def model_spec_iaf(x, hps, mode, gpu=-1):
             
             x = tf.nn.elu(h)
             x = deconv2d("x_dec", x, 3, [5, 5])
-            x = tf.clip_by_value(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
+            # x = tf.clip_by_value(x, -0.5 + 1 / 512., 0.5 - 1 / 512.)
 
         if mode == 'init' : 
             return h_topi

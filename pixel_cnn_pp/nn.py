@@ -210,6 +210,45 @@ def dense(x, num_units, nonlinearity=None, init_scale=1., counters={}, init=Fals
                 x = nonlinearity(x)
             return x
 
+# stupid tensorflow names variables incrementally EVEN if they have different prefixes
+@add_arg_scope
+def dense_vae_stream(x, num_units, nonlinearity=None, init_scale=1., counters={}, init=False, ema=None, **kwargs):
+    ''' fully connected layer '''
+    name = get_name('dense_vae_stream', counters)
+    with tf.variable_scope(name):
+        if init:
+            # data based initialization of parameters
+            V = tf.get_variable('V', [int(x.get_shape()[
+                                1]), num_units], tf.float32, tf.random_normal_initializer(0, 0.05), trainable=True)
+            V_norm = tf.nn.l2_normalize(V.initialized_value(), [0])
+            x_init = tf.matmul(x, V_norm)
+            m_init, v_init = tf.nn.moments(x_init, [0])
+            scale_init = init_scale / tf.sqrt(v_init + 1e-10)
+            g = tf.get_variable('g', dtype=tf.float32,
+                                initializer=scale_init, trainable=True)
+            b = tf.get_variable('b', dtype=tf.float32,
+                                initializer=-m_init * scale_init, trainable=True)
+            x_init = tf.reshape(
+                scale_init, [1, num_units]) * (x_init - tf.reshape(m_init, [1, num_units]))
+            if nonlinearity is not None:
+                x_init = nonlinearity(x_init)
+            return x_init
+
+        else:
+            V, g, b = get_vars_maybe_avg(['V', 'g', 'b'], ema)
+            tf.assert_variables_initialized([V, g, b])
+
+            # use weight normalization (Salimans & Kingma, 2016)
+            x = tf.matmul(x, V)
+            scaler = g / tf.sqrt(tf.reduce_sum(tf.square(V), [0]))
+            x = tf.reshape(scaler, [1, num_units]) * \
+                x + tf.reshape(b, [1, num_units])
+
+            # apply nonlinearity
+            if nonlinearity is not None:
+                x = nonlinearity(x)
+            return x
+
 
 @add_arg_scope
 def conv2d(x, num_filters, filter_size=[3, 3], stride=[1, 1], pad='SAME', nonlinearity=None, init_scale=1., counters={}, init=False, ema=None, **kwargs):
@@ -309,16 +348,30 @@ def nin(x, num_units, **kwargs):
     x = dense(x, num_units, **kwargs)
     return tf.reshape(x, s[:-1] + [num_units])
 
+@add_arg_scope
+def nin_vae_stream(x, num_units, **kwargs):
+    """ a network in network layer (1x1 CONV) """
+    s = int_shape(x)
+    x = tf.reshape(x, [np.prod(s[:-1]), s[-1]])
+    x = dense_vae_stream(x, num_units, **kwargs)
+    return tf.reshape(x, s[:-1] + [num_units])
 ''' meta-layer consisting of multiple base layers '''
 
 
 @add_arg_scope
-def gated_resnet(x, a=None, h=None, nonlinearity=concat_elu, conv=conv2d, init=False, counters={}, ema=None, dropout_p=0., **kwargs):
+def gated_resnet(x, a=None, h=None, vae_out=None, nonlinearity=concat_elu, conv=conv2d, init=False, counters={}, ema=None, dropout_p=0., **kwargs):
     xs = int_shape(x)
     num_filters = xs[-1]
     c1 = conv(nonlinearity(x), num_filters)
     if a is not None:  # add short-cut connection if auxiliary input 'a' is given
-        c1 += nin(nonlinearity(a), num_filters)
+        with tf.variable_scope('skip_pcnn'):
+            c1 += nin(nonlinearity(a), num_filters)
+
+    # I have to make a new var scope such that things don't fail when it's not used
+    if vae_out is not None:  # add short-cut connection if auxiliary input 'vae_out' is given
+        with tf.variable_scope('skip_vae'):
+            c1 += nin_vae_stream(nonlinearity(vae_out), num_filters)
+
     c1 = nonlinearity(c1)
     if dropout_p > 0:
         c1 = tf.nn.dropout(c1, keep_prob=1. - dropout_p)

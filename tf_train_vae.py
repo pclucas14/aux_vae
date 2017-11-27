@@ -134,29 +134,11 @@ xs = [tf.placeholder(tf.float32, shape=(args.batch_size, ) + obs_shape)
               for i in range(args.num_gpus)]
 tf_lr = tf.placeholder(tf.float32, shape=[])
 
-h_init = None
-h_sample = [None] * args.num_gpus
-hs = h_sample
-
-# for PIXELCNN initialization
-model_opt = {'nr_filters': args.nr_filters,
-             'nr_logistic_mix': args.nr_logistic_mix, 
-             'resnet_nonlinearity': args.resnet_nonlinearity,
-             'nr_resnet': args.nr_resnet}
-
 # for regular training
 with tf.name_scope('vae_iaf'):
-    vae_iaf    = tf.make_template('vae_iaf', model_spec_iaf)
-    out_vae    = vae_iaf(x_init, args, 'init', -1) 
+    vae_iaf  = tf.make_template('vae_iaf', model_spec_iaf)
+    # init_vae = vae_iaf(x_init, args, 'init', -1) 
 
-with tf.name_scope('pixel_cnn'):
-    pixel_cnn  = tf.make_template('pixel_cnn', model_spec)
-    x_init_pcnn = tf.transpose(x_init, perm=[0,2,3,1])
-    pcnn_out    = pixel_cnn(x_init_pcnn, h_init, vae_out=x_init_pcnn, 
-                    init=True, dropout_p=args.dropout_p, **model_opt)
-    pcnn_params = [v for v in tf.trainable_variables() if 'pixel_cnn' in v.name] 
-    ema = tf.train.ExponentialMovingAverage(decay=args.polyak_decay)
-    maintain_averages_op = tf.group(ema.apply(pcnn_params))
 
 recons_vae_train, recons_vae_test     = [], []
 kls_cost_vae_train, kls_cost_vae_test = [], []
@@ -164,12 +146,9 @@ kls_obj_vae_train, kls_obj_vae_test   = [], []
 elbos_vae_train, elbos_vae_test       = [], []
 losses_vae_train, losses_vae_test     = [], []
 
-recons_pcnn_train, recons_pcnn_test   = [], []
-elbos_pcnn_train,  elbos_pcnn_test    = [], []
 vae_outs_train,    pcnns_out_train    = [], []
 vae_outs_test,    pcnns_out_test      = [], []
-losses_total_train, losses_total_test = [], []
-updates_all = []
+updates_vae = []
 
 dec_log_stdv = tf.get_variable("dec_log_stdv", initializer=tf.constant(0.0))
 global_step = tf.get_variable("global_step", [], tf.int32, initializer=tf.zeros_initializer(),
@@ -177,9 +156,11 @@ global_step = tf.get_variable("global_step", [], tf.int32, initializer=tf.zeros_
 
 for i in range(args.num_gpus):
     with tf.device('/gpu:%d' % i):
-        
+        # rescale input to be in [-.5, .5]
+        xs_scaled = xs[i]  / 2.
+
         ''' First pass : VAE '''
-        vae_out_train, recon, kl_cost, kl_obj_train = vae_iaf(xs[i], args, 'train', i)
+        vae_out_train, recon, kl_cost, kl_obj_train = vae_iaf(xs_scaled, args, 'train', i)
         vae_outs_train     += [vae_out_train]
         recons_vae_train   += [tf.reduce_sum(recon)]
         kls_cost_vae_train += [tf.reduce_sum(kl_cost)]
@@ -187,7 +168,7 @@ for i in range(args.num_gpus):
         losses_vae_train   += [tf.reduce_sum(kl_cost - recon)]
         elbos_vae_train    += [tf.reduce_sum(kl_obj_train -  recon)]
 
-        vae_out_test, recon, kl_cost, kl_obj_test  = vae_iaf(xs[i], args, 'eval', i)
+        vae_out_test, recon, kl_cost, kl_obj_test  = vae_iaf(xs_scaled, args, 'eval', i)
         vae_outs_test      += [vae_out_test]
         recons_vae_test    += [tf.reduce_sum(recon)]
         kls_cost_vae_test  += [tf.reduce_sum(kl_cost)]
@@ -195,27 +176,8 @@ for i in range(args.num_gpus):
         losses_vae_test    += [tf.reduce_sum(kl_cost - recon)]
         elbos_vae_test     += [tf.reduce_sum(kl_obj_test - recon)]
         
-        ''' Second Pass : PixelCNN '''
-        input_vae_stream_train = tf.transpose(2*vae_out_train, perm=[0,2,3,1])
-        input_vae_stream_test  = tf.transpose(2*vae_out_test,  perm=[0,2,3,1])
-        pcnn_input = tf.transpose(xs[i], perm=[0,2,3,1])
-        pcnn_out_train = pixel_cnn(pcnn_input, hs[i], ema=None, dropout_p=args.dropout_p, **model_opt, 
-                            vae_out=input_vae_stream_train)
-        pcnn_out_test  = pixel_cnn(pcnn_input, hs[i], ema=None, dropout_p=0., **model_opt, 
-                            vae_out=input_vae_stream_test)
-
-        target_pcnn = tf.transpose(xs[i], perm=[0,2,3,1])
-        recons_pcnn_train  += [nn.discretized_mix_logistic_loss(target_pcnn, pcnn_out_train)]
-        recons_pcnn_test   += [nn.discretized_mix_logistic_loss(target_pcnn, pcnn_out_test)]
-        elbos_pcnn_train   += [tf.reduce_sum(recons_pcnn_train[-1] + kl_obj_train)] 
-        elbos_pcnn_test    += [tf.reduce_sum(recons_pcnn_test[-1]  + kl_obj_test)] 
-
-        losses_total_train += [tf.reduce_sum(recons_pcnn_train[-1] - recons_vae_train[-1] + 
-                                    args.Lambda * kls_cost_vae_train[-1])]
-        losses_total_test  += [tf.reduce_sum(recons_pcnn_test[-1] - recons_vae_test[-1] + 
-                                    args.Lambda * kls_cost_vae_test[-1])]
         
-        updates_all += [tf.train.AdamOptimizer(tf_lr).minimize(losses_total_train[-1], 
+        updates_vae += [tf.train.AdamOptimizer(tf_lr).minimize(losses_vae_train[-1], 
                 global_step=global_step)]
         
 
@@ -224,16 +186,14 @@ denominator = (np.log(2.) * num_pixels * args.batch_size * args.num_gpus)
 
 bpd_vae_train = tf.add_n(elbos_vae_train)    / denominator 
 bpd_vae_test = tf.add_n(elbos_vae_test)      / denominator
-bpd_pcnn_train = tf.add_n(recons_pcnn_train) / denominator
-bpd_pcnn_test = tf.add_n(recons_pcnn_test)   / denominator
  
 if args.mode == "train":
-    # with tf.name_scope('vae_iaf'):
-    #     vae_op = tf.group(*[tf.train.AdamOptimizer(tf_lr).minimize(obj, global_step=global_step) for obj in losses_vae_train]) 
+    with tf.name_scope('vae_iaf'):
+        vae_op = tf.group(*updates_vae) 
     # with tf.name_scope('pixel_cnn'):
     #     pcnn_op = tf.group(*[tf.train.AdamOptimizer(tf_lr).minimize(obj, global_step=global_step) for obj in recons_pcnn_train]) 
     
-    train_op = tf.group(*updates_all)
+    # train_op = tf.group(*updates_all)
 
     train_summaries = [
     tf.summary.scalar('train/recon_vae', tf.add_n(recons_vae_train) / denominator),
@@ -241,8 +201,6 @@ if args.mode == "train":
     tf.summary.scalar('train/elbo_vae', tf.add_n(elbos_vae_train) / denominator),
     tf.summary.scalar('train/obj_vae', tf.add_n(losses_vae_train) / denominator),
     tf.summary.scalar('train/bpd_vae', bpd_vae_train),
-    tf.summary.scalar('train/recon_pcnn', tf.add_n(recons_pcnn_train) / denominator),
-    tf.summary.scalar('train/elbo_pcnn', tf.add_n(elbos_pcnn_train) / denominator),
     tf.summary.image( 'train/image_vae', tf.transpose(vae_outs_train[-1], perm=[0,2,3,1]))
     ]
 
@@ -252,24 +210,16 @@ if args.mode == "train":
     tf.summary.scalar('test/elbo_vae', tf.add_n(elbos_vae_test) / denominator),
     tf.summary.scalar('test/obj_vae', tf.add_n(losses_vae_test) / denominator),
     tf.summary.scalar('test/bpd_vae', bpd_vae_test),
-    tf.summary.scalar('test/recon_pcnn', tf.add_n(recons_pcnn_test) / denominator),
-    tf.summary.scalar('test/elbo_pcnn', tf.add_n(elbos_pcnn_test) / denominator),
     tf.summary.image( 'test/image_vae', tf.transpose(vae_outs_test[-1], perm=[0,2,3,1]))
     ]
 
     merged_train, merged_test = [tf.summary.merge(x) for x in [train_summaries, test_summaries]]
 
-pcnn_var_list       = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='pixel_cnn')
-pcnn_opt_list       = [x for x in pcnn_var_list if 'adam' in x.name.lower()]
-pcnn_var_list       = [x for x in pcnn_var_list if 'adam' not in x.name.lower()]
-saver_pcnn          = tf.train.Saver(var_list=pcnn_var_list, max_to_keep=None)
-saver_pcnn_opt      = tf.train.Saver(var_list=pcnn_opt_list, max_to_keep=None)
-
 vae_var_list       = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='vae_iaf')
 vae_opt_list       = [x for x in vae_var_list if 'adam' in x.name.lower()]
 vae_var_list       = [x for x in vae_var_list if 'adam' not in x.name.lower()]
 saver_vae          = tf.train.Saver(var_list=vae_var_list, max_to_keep=None)
-# saver_vae_opt      = tf.train.Saver(var_list=vae_opt_list, max_to_keep=None)
+saver_vae_opt      = tf.train.Saver(var_list=vae_opt_list, max_to_keep=None)
 
 total_size = 0
 for v in tf.trainable_variables():
@@ -290,14 +240,13 @@ with tf.Session(config=config) as sess:
             print('initalizing weights')
             data_init = train_data.next(args.init_batch_size).transpose(0,3,1,2)
             feed_dict = {x_init:data_init}
-            sess.run(tf.global_variables_initializer(), feed_dict)
+            # sess.run(init_vae.initializer, {x_init:data_init})
+            sess.run(tf.global_variables_initializer()) # , feed_dict)
 
         if args.load_params : 
             print('trying to load from checkpoint')
-            saver_pcnn.restore(sess, args.save_dir + '/params_pcnn.ckpt')
-            saver_pcnn_opt.restore(sess, args.save_dir + '/params_pcnn_opt.ckpt')
             saver_vae.restore(sess, args.save_dir + '/params_vae.ckpt')
-            # saver_vae_opt.restore(sess, args.save_dir + '/params_vae_opt.ckpt')
+            saver_vae_opt.restore(sess, args.save_dir + '/params_vae_opt.ckpt')
             print('restored!')               
         
         print('training!')
@@ -313,32 +262,27 @@ with tf.Session(config=config) as sess:
             feed_dict = {xs[i]: x_data[i] for i in range(args.num_gpus)}
             feed_dict.update({tf_lr : lr})
             
-            op = train_op 
+            op = vae_op 
             fetches = [bpd_vae_train,           # 0
-                       bpd_pcnn_train,          # 1
-                       kls_obj_vae_train[-1],   # 2
-                       kls_cost_vae_train[-1],  # 3
-                       global_step,             # 4
-                       dec_log_stdv,            # 5
-                       losses_total_train[-1],  # 6
-                       op]                      # 7
-            fetches += [vae_out_train,          # 8
-                        pcnn_input,             # 9
-                        target_pcnn,            # 10
-                        pcnn_out_train,         # 11
-                        input_vae_stream_train] # 12
+                       kls_obj_vae_train[-1],   # 1
+                       kls_cost_vae_train[-1],  # 2
+                       global_step,             # 3
+                       dec_log_stdv,            # 4
+                       vae_op,                  # 5
+                       elbos_vae_train[-1],     # 6
+                       vae_out_train]           # 7
             
             should_compute_summary = ((local_step  + 1) % 25 == 0)
             if should_compute_summary : 
                 fetches += [merged_train]
             
             fetched = sess.run(fetches, feed_dict)
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             train_err.append(fetched[0])
             
             if  local_step < 10 or should_compute_summary:
-                print("Iteration %d, time = %.2fs, train bpd vae %.4f, pcnn %.4f, full %.4f, dec_log_stdv = %.4f" % (
-                      fetched[3], time.time() - begin, fetched[0], fetched[1], fetched[5], fetched[4]))
+                print("Iteration %d, time = %.2fs, train bpd vae %.4f, dec_log_stdv = %.4f" % (
+                      fetched[3], time.time() - begin, fetched[0], fetched[4]))
                 print('kl : %s' % fetched[2])
                 if should_compute_summary : train_writer.add_summary(fetched[-1], fetched[3])
                 begin = time.time()
@@ -360,7 +304,7 @@ with tf.Session(config=config) as sess:
             x_data = np.split(x_data, args.num_gpus)
             feed_dict = {xs[i]: x_data[i] for i in range(args.num_gpus)}
            
-            fetches = [bpd_vae_test, bpd_pcnn_test, kls_obj_vae_test[-1], global_step, dec_log_stdv]
+            fetches = [bpd_vae_test, kls_obj_vae_test[-1], global_step, dec_log_stdv]
             should_compute_summary = ((local_step + 1) % 25 == 0)
 
             if should_compute_summary : 
@@ -370,9 +314,9 @@ with tf.Session(config=config) as sess:
             test_err.append(fetched[0])
 
             if  local_step < 10 or should_compute_summary:
-                print("Iteration %d, time = %.2fs, test bpd vae %.4f, pcnn  %.4f, dec_log_stdv = %.4f" % (
-                      fetched[3], time.time() - begin, fetched[0], fetched[1], fetched[4]))
-                print('kl : %s' % fetched[2])
+                print("Iteration %d, time = %.2fs, test bpd vae %.4f, dec_log_stdv = %.4f" % (
+                      fetched[2], time.time() - begin, fetched[0], fetched[3]))
+                print('kl : %s' % fetched[1])
                 if should_compute_summary : test_writer.add_summary(fetched[-1], fetched[3])
                 begin = time.time()
             if np.isnan(fetched[2]).any():
@@ -385,10 +329,8 @@ with tf.Session(config=config) as sess:
        
         if (epoch + 1) % args.save_interval == 0 : 
             print('saving parameters')
-            saver_pcnn.save(sess, args.save_dir + '/params_pcnn.ckpt')
-            saver_pcnn_opt.save(sess, args.save_dir + '/params_pcnn_opt.ckpt')
             saver_vae.save(sess, args.save_dir + '/params_vae.ckpt')
-            # saver_vae_opt.save(sess, args.save_dir + '/params_vae_opt.ckpt')
+            saver_vae_opt.save(sess, args.save_dir + '/params_vae_opt.ckpt')
             print('parameters saved')
         
         '''
